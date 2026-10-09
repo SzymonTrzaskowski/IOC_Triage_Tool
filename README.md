@@ -54,6 +54,10 @@ d41d8cd98f00b204e9800998ecf8427e
 
 ## Web UI
 
+Double-click [`start_ui.bat`](start_ui.bat) (Windows). The browser should open at http://localhost:8501. Closing that console window stops the server.
+
+Or from a terminal:
+
 ```bash
 streamlit run ui_app.py
 ```
