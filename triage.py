@@ -21,16 +21,20 @@ from core.classifier import (
     TriageResult,
     Verdict,
     VT_NOT_FOUND_NOTE,
-    classify,
+    classify_abuseipdb,
+    classify_virustotal,
+    combine_verdicts,
     detect_type,
-    detection_count_from_sources,
+    format_abuse_cell,
+    format_vt_cell,
     normalize_ioc,
-    verdict_from_sources,
 )
 from core.virustotal import VirusTotalClient
 from reports.report_generator import verdict_style, write_report
 
 VT_MIN_INTERVAL_SECONDS = 16.0
+DEFAULT_BATCH_CAP = 20
+MAX_BATCH_CAP = 50
 console = Console()
 
 
@@ -77,13 +81,46 @@ def load_iocs(args: argparse.Namespace) -> list[str]:
     if not path.exists():
         console.print(f"[red]File not found:[/red] {path}")
         sys.exit(1)
+    return parse_ioc_lines(path.read_text(encoding="utf-8"))
+
+
+def parse_ioc_lines(text: str) -> list[str]:
+    """Parse one-IOC-per-line text, ignoring blanks and comments.
+
+    Args:
+        text: Raw textarea or file contents.
+
+    Returns:
+        IOC strings in file order.
+    """
     iocs: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         iocs.append(stripped)
     return iocs
+
+
+def count_uncached(raw_iocs: list[str], cache: IocCache) -> int:
+    """Count IOCs that would miss the 24h cache.
+
+    Args:
+        raw_iocs: Raw IOC strings.
+        cache: Local cache.
+
+    Returns:
+        Number of cache misses (including unrecognized types, which skip VT).
+    """
+    misses = 0
+    for raw in raw_iocs:
+        ioc_type = detect_type(raw)
+        if ioc_type == IocType.UNKNOWN:
+            continue
+        ioc = normalize_ioc(raw, ioc_type)
+        if cache.get(ioc_type, ioc) is None:
+            misses += 1
+    return misses
 
 
 def payload_to_result(
@@ -109,18 +146,35 @@ def payload_to_result(
     abuse_score = payload.get("abuse_score")
     if abuse_score is not None:
         abuse_score = int(abuse_score)
-    count = detection_count_from_sources(vt_malicious, vt_suspicious, abuse_score)
-    has_vt_report = bool(payload.get("vt_report"))
-    has_abuse = abuse_score is not None
-    has_report = has_vt_report or has_abuse
+    error_text = str(payload.get("error") or "")
+    vt_not_found = bool(payload.get("vt_not_found")) or (
+        "not found" in error_text.lower()
+    )
+    has_vt_report = bool(payload.get("vt_report")) or (
+        int(payload.get("vt_total") or 0) > 0 and not vt_not_found
+    )
+    if vt_not_found:
+        vt_verdict: Optional[Verdict] = Verdict.UNKNOWN
+    elif has_vt_report:
+        vt_verdict = classify_virustotal(
+            vt_malicious,
+            vt_suspicious,
+            has_report=True,
+        )
+    else:
+        vt_verdict = None
+    abuse_verdict = classify_abuseipdb(abuse_score)
     note = payload.get("error")
-    if payload.get("vt_not_found") and not has_abuse:
+    if vt_not_found and abuse_verdict is None:
         note = VT_NOT_FOUND_NOTE
+    vt_hits = vt_malicious + vt_suspicious
     return TriageResult(
         ioc=ioc,
         ioc_type=ioc_type,
-        verdict=verdict_from_sources(count, has_report=has_report),
-        detection_count=count,
+        verdict=combine_verdicts(vt_verdict, abuse_verdict),
+        vt_verdict=vt_verdict,
+        abuse_verdict=abuse_verdict,
+        detection_count=vt_hits,
         vt_malicious=vt_malicious,
         vt_suspicious=vt_suspicious,
         vt_total=vt_total,
@@ -216,7 +270,7 @@ def triage_one(
         return TriageResult(
             ioc=raw.strip(),
             ioc_type=IocType.UNKNOWN,
-            verdict=Verdict.CLEAN,
+            verdict=Verdict.UNKNOWN,
             error="Unrecognized IOC type",
         )
     ioc = normalize_ioc(raw, ioc_type)
@@ -269,28 +323,22 @@ def render_table(results: list[TriageResult]) -> None:
     table.add_column("IOC", overflow="fold")
     table.add_column("Type")
     table.add_column("Verdict")
-    table.add_column("VT detections")
+    table.add_column("VirusTotal")
+    table.add_column("AbuseIPDB")
     table.add_column("Country")
     table.add_column("Notes", overflow="fold")
     for row in results:
-        vt_text = (
-            f"{row.vt_malicious + row.vt_suspicious}/{row.vt_total} silników VT "
-            "oznaczyło jako malicious"
-            if row.vt_total
-            else "—"
-        )
         notes: list[str] = []
         if row.from_cache:
             notes.append("cache")
-        if row.abuse_score is not None:
-            notes.append(f"AbuseIPDB {row.abuse_score}%")
         if row.error:
             notes.append(row.error)
         table.add_row(
             row.ioc,
             row.ioc_type.value,
             f"[{verdict_style(row.verdict)}]{row.verdict.value}[/]",
-            vt_text,
+            format_vt_cell(row),
+            format_abuse_cell(row),
             row.country or "—",
             ", ".join(notes) if notes else "—",
         )

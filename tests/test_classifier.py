@@ -8,11 +8,12 @@ from core.classifier import (
     IocType,
     Verdict,
     classify,
+    classify_abuseipdb,
+    classify_virustotal,
+    combine_verdicts,
     detect_type,
-    detection_count_from_sources,
     normalize_ioc,
     normalize_url,
-    verdict_from_sources,
 )
 
 
@@ -80,8 +81,61 @@ def test_classify_thresholds(count: int, verdict: Verdict) -> None:
 
 def test_vt_404_is_unknown_not_clean() -> None:
     """Missing VT analysis is Unknown; Clean requires an actual report."""
-    assert verdict_from_sources(0, has_report=False) == Verdict.UNKNOWN
-    assert verdict_from_sources(0, has_report=True) == Verdict.CLEAN
+    assert classify_virustotal(0, 0, has_report=False) == Verdict.UNKNOWN
+    assert classify_virustotal(0, 0, has_report=True) == Verdict.CLEAN
 
 
-def test_payload_404_maps
+def test_payload_404_maps_to_unknown() -> None:
+    """Merged VT 404 payload becomes Unknown with the analyst-facing note."""
+    from core.classifier import VT_NOT_FOUND_NOTE
+    from triage import merge_lookups, payload_to_result
+
+    merged = merge_lookups({"error": "VirusTotal: indicator not found"}, None)
+    result = payload_to_result("https://x.pl/", IocType.URL, merged)
+    assert result.verdict == Verdict.UNKNOWN
+    assert result.vt_verdict == Verdict.UNKNOWN
+    assert result.error == VT_NOT_FOUND_NOTE
+
+
+@pytest.mark.parametrize(
+    ("score", "expected"),
+    [
+        (0, Verdict.CLEAN),
+        (24, Verdict.CLEAN),
+        (25, Verdict.SUSPICIOUS),
+        (74, Verdict.SUSPICIOUS),
+        (75, Verdict.MALICIOUS),
+        (100, Verdict.MALICIOUS),
+        (None, None),
+    ],
+)
+def test_classify_abuseipdb(score: int | None, expected: Verdict | None) -> None:
+    """AbuseIPDB uses score bands, not a fake extra VT engine."""
+    assert classify_abuseipdb(score) == expected
+
+
+def test_combined_verdict_is_worse_of_sources() -> None:
+    """Final verdict is max severity; scores are not summed into VT engines."""
+    assert combine_verdicts(Verdict.CLEAN, Verdict.MALICIOUS) == Verdict.MALICIOUS
+    assert combine_verdicts(Verdict.CLEAN, Verdict.SUSPICIOUS) == Verdict.SUSPICIOUS
+    assert combine_verdicts(Verdict.UNKNOWN, None) == Verdict.UNKNOWN
+    assert combine_verdicts(Verdict.CLEAN, None) == Verdict.CLEAN
+    assert combine_verdicts(None, None) == Verdict.UNKNOWN
+
+
+def test_vt_clean_plus_high_abuse_is_malicious() -> None:
+    """A clean VT report does not hide a high AbuseIPDB score."""
+    from triage import merge_lookups, payload_to_result
+
+    vt = {
+        "vt_malicious": 0,
+        "vt_suspicious": 0,
+        "vt_total": 70,
+        "vt_link": "https://www.virustotal.com/gui/ip-address/203.0.113.10",
+    }
+    abuse = {"abuse_score": 88, "country": "NL"}
+    result = payload_to_result("203.0.113.10", IocType.IP, merge_lookups(vt, abuse))
+    assert result.vt_verdict == Verdict.CLEAN
+    assert result.abuse_verdict == Verdict.MALICIOUS
+    assert result.verdict == Verdict.MALICIOUS
+    assert result.detection_count == 0

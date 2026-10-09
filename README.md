@@ -1,16 +1,17 @@
 # IOC Triage Tool
 
-Analitycy SOC i CSIRT na starcie incydentu ręcznie wklejają wskaźniki kompromitacji (IOC) do VirusTotal, AbuseIPDB i podobnych serwisów. To narzędzie CLI automatyzuje **pierwszy krok triage’u**: rozpoznaje typ IOC, odpytuje publiczne API threat intelligence, klasyfikuje wynik (Clean / Suspicious / Malicious) i generuje tabelę plus raport Markdown gotowy do wklejenia w ticket.
+SOC and CSIRT analysts usually paste indicators of compromise into VirusTotal, AbuseIPDB, and similar sites at the start of an incident. This tool automates that **first triage step**: it detects the IOC type, queries public threat-intel APIs, classifies each source separately, and produces a terminal table plus a Markdown report ready to paste into a ticket.
 
 ## Stack
 
 - Python 3.10+
-- [httpx](https://www.python-httpx.org/) — HTTP do VirusTotal v3 i AbuseIPDB
-- [python-dotenv](https://github.com/theskumar/python-dotenv) — klucze z `.env`
-- [rich](https://github.com/Textualize/rich) — kolorowa tabela w terminalu
-- [pytest](https://pytest.org/) — testy z zamockowanym HTTP
+- [httpx](https://www.python-httpx.org/) — HTTP for VirusTotal v3 and AbuseIPDB
+- [python-dotenv](https://github.com/theskumar/python-dotenv) — API keys from `.env`
+- [rich](https://github.com/Textualize/rich) — color table in the terminal
+- [streamlit](https://streamlit.io/) — local web UI
+- [pytest](https://pytest.org/) — tests with mocked HTTP (no live API calls)
 
-## Instalacja
+## Install
 
 ```bash
 python -m venv .venv
@@ -24,79 +25,79 @@ copy .env.example .env   # Windows
 # cp .env.example .env   # macOS / Linux
 ```
 
-Uzupełnij klucze w `.env` (nie commituj tego pliku).
+Put keys in `.env` (do not commit that file).
 
-## Darmowe klucze API
+## Free API keys
 
-1. **VirusTotal** — konto i klucz: [https://www.virustotal.com/gui/my-apikey](https://www.virustotal.com/gui/my-apikey)  
-   Darmowy tier: **4 zapytania na minutę**. Narzędzie wstawia ~16 s przerwy między rzeczywistymi requestami VT (trafienia z cache nie liczą się do limitu).
-2. **AbuseIPDB** — rejestracja i klucz: [https://www.abuseipdb.com/api](https://www.abuseipdb.com/api)
+1. **VirusTotal** — [https://www.virustotal.com/gui/my-apikey](https://www.virustotal.com/gui/my-apikey)  
+   Free tier: **4 requests per minute**. The tool waits ~16s between real VT calls (cache hits do not count).
+2. **AbuseIPDB** — [https://www.abuseipdb.com/api](https://www.abuseipdb.com/api)
 
-Brak klucza nie wywala programu: dana integracja jest pomijana z ostrzeżeniem.
+A missing key skips that integration with a warning instead of crashing.
 
-## Przykłady użycia
-
-Pojedynczy IOC:
+## CLI
 
 ```bash
 python triage.py --ioc 8.8.8.8
-```
-
-Lista z pliku i eksport raportu:
-
-```bash
 python triage.py --file iocs.txt --export-md ticket.md
 ```
 
-Przykładowy `iocs.txt`:
+Example `iocs.txt`:
 
 ```
-# jeden IOC na linię
+# one IOC per line
 8.8.8.8
 example.com
 https://example.com/login
 d41d8cd98f00b204e9800998ecf8427e
 ```
 
-Przykładowy output terminala:
+## Web UI
 
-```
-                          IOC Triage Tool
-┏━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━┓
-┃ IOC        ┃ Type   ┃ Verdict    ┃ VT detections              ┃ Country ┃ Notes        ┃
-┡━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━┩
-│ 8.8.8.8    │ ip     │ Clean      │ 0/70 silników VT oznaczyło │ US      │ AbuseIPDB 0% │
-│            │        │            │ jako malicious             │         │              │
-└────────────┴────────┴────────────┴────────────────────────────┴─────────┴──────────────┘
+```bash
+streamlit run ui_app.py
 ```
 
-Werdykt:
+Paste IOCs or upload a file. Results stay in session state so downloading Markdown does not clear the table. Before a run, the UI estimates wait time (`uncached IOCs × 16s`) and caps the batch (default 20, max 50).
 
-- **Clean** — jest raport (np. z VirusTotal) i 0 silników oznacza IOC
-- **Suspicious** — 1–3 silniki (VT `malicious` + `suspicious`; AbuseIPDB +1 przy score ≥ 25)
-- **Malicious** — 4+ silników
-- **Unknown** — VirusTotal zwraca 404 (IOC nigdy nie był skanowany) i nie ma innego źródła z danymi; to **nie** jest Clean
+## Verdicts
 
-URL-e są kanonizowane przed cache i przed ID VirusTotal (`https://X.pl`, `https://x.pl/` i `https://x.pl:443/` to ten sam IOC).
+VirusTotal and AbuseIPDB are **separate columns**. The final verdict is the **worse** of the two (not a summed engine count).
 
-Wyniki są cache’owane lokalnie w `.cache/ioc_cache.json` przez **24 godziny**.
+**VirusTotal** (malicious + suspicious engines), only when a report exists:
 
-Testy (bez prawdziwego HTTP):
+- **Clean** — 0 engines
+- **Suspicious** — 1–3 engines
+- **Malicious** — 4+ engines
+- **Unknown** — HTTP 404 / never scanned (this is not Clean)
+
+**AbuseIPDB** (IP only, when a score exists):
+
+- **Clean** — 0–24
+- **Suspicious** — 25–74
+- **Malicious** — 75–100
+
+Severity order: Malicious > Suspicious > Unknown > Clean. Example: VT Clean `0/70` + AbuseIPDB `88%` → final **Malicious**.
+
+URLs are canonicalized before cache and before the VirusTotal URL id (`https://X.pl`, `https://x.pl/`, and `https://x.pl:443/` are the same IOC).
+
+Results are cached in `.cache/ioc_cache.json` for **24 hours**.
 
 ```bash
 pytest
 ```
 
-## Jak to działa
+## How it works
 
 ```
-triage.py  →  detect_type (regex)
-           →  cache JSON (24h)
-           →  VirusTotal v3  (+ AbuseIPDB dla IP)
-           →  classify  →  tabela rich  →  opcjonalny Markdown
+triage.py / ui_app.py  →  detect_type (regex)
+                       →  JSON cache (24h)
+                       →  VirusTotal v3  (+ AbuseIPDB for IPs)
+                       →  per-source verdicts  →  worse-of  →  table / Markdown
 ```
 
-- [`core/classifier.py`](core/classifier.py) — typ IOC (URL → IP → hash MD5/SHA1/SHA256 → domena) i progi werdyktu
-- [`core/virustotal.py`](core/virustotal.py) / [`core/abuseipdb.py`](core/abuseipdb.py) — klienci API, timeouty i błędy sieci bez crasha całego przebiegu
-- [`core/cache.py`](core/cache.py) — persystencja JSON, żeby nie spalać darmowego limitu przy powtórnym sprawdzeniu
-- [`reports/report_generator.py`](reports/report_generator.py) — raport: IOC, typ, werdykt, liczby silników, kraj, powiązane wskaźniki, link do GUI VirusTotal
+- [`core/classifier.py`](core/classifier.py) — IOC type, URL normalization, VT/AbuseIPDB verdicts
+- [`core/virustotal.py`](core/virustotal.py) / [`core/abuseipdb.py`](core/abuseipdb.py) — API clients; network errors do not abort the batch
+- [`core/cache.py`](core/cache.py) — JSON cache to protect the free API quota
+- [`reports/report_generator.py`](reports/report_generator.py) — ticket-ready Markdown
+- [`ui_app.py`](ui_app.py) — Streamlit UI

@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.classifier import TriageResult, Verdict
+from core.classifier import (
+    TriageResult,
+    Verdict,
+    format_abuse_cell,
+    format_vt_cell,
+)
 
 
 def generate_markdown(results: list[TriageResult]) -> str:
@@ -23,22 +28,18 @@ def generate_markdown(results: list[TriageResult]) -> str:
         "",
         f"Generated: {generated}",
         "",
-        "| IOC | Type | Verdict | VT detections | Country | Related | VirusTotal |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| IOC | Type | Verdict | VirusTotal | AbuseIPDB | Country | Related | VT link |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in results:
         related = ", ".join(row.related) if row.related else "—"
         country = row.country or "—"
-        vt_cell = (
-            f"{row.vt_malicious + row.vt_suspicious}/{row.vt_total} malicious"
-            if row.vt_total
-            else "—"
-        )
         link = f"[report]({row.vt_link})" if row.vt_link else "—"
         ioc_md = f"`{row.ioc}`"
         lines.append(
             f"| {ioc_md} | {row.ioc_type.value} | **{row.verdict.value}** | "
-            f"{vt_cell} | {country} | {related} | {link} |"
+            f"{format_vt_cell(row)} | {format_abuse_cell(row)} | {country} | "
+            f"{related} | {link} |"
         )
     lines.extend(["", "## Details", ""])
     for row in results:
@@ -65,31 +66,30 @@ def _detail_section(row: TriageResult) -> list[str]:
     Returns:
         Markdown lines for this IOC.
     """
-    vt_raw = (
-        f"{row.vt_malicious + row.vt_suspicious}/{row.vt_total} silników VT "
-        "oznaczyło jako malicious/suspicious"
-        if row.vt_total
-        else "brak danych VirusTotal"
+    vt_raw = format_vt_cell(row)
+    if row.vt_total:
+        hits = row.vt_malicious + row.vt_suspicious
+        vt_raw = (
+            f"{row.vt_verdict.value if row.vt_verdict else '—'} — "
+            f"{hits}/{row.vt_total} VirusTotal engines flagged malicious/suspicious"
+        )
+    abuse = format_abuse_cell(row)
+    related = (
+        ", ".join(f"`{item}`" for item in row.related) if row.related else "none"
     )
-    abuse = (
-        f"{row.abuse_score}"
-        if row.abuse_score is not None
-        else "n/d"
-    )
-    related = ", ".join(f"`{item}`" for item in row.related) if row.related else "brak"
-    error = f"\n- Błąd: {row.error}" if row.error else ""
-    cache = "tak" if row.from_cache else "nie"
+    error = f"\n- Note: {row.error}" if row.error else ""
+    cache = "yes" if row.from_cache else "no"
     return [
         f"### `{row.ioc}`",
         "",
-        f"- Typ: `{row.ioc_type.value}`",
-        f"- Werdykt: **{row.verdict.value}** (łącznie {row.detection_count} silników)",
-        f"- Wykrycia: {vt_raw}",
-        f"- AbuseIPDB confidence: {abuse}",
-        f"- Kraj: {row.country or 'n/d'}",
-        f"- Powiązane domeny/hashe: {related}",
-        f"- Link VirusTotal: {row.vt_link or 'n/d'}",
-        f"- Z cache (24h): {cache}{error}",
+        f"- Type: `{row.ioc_type.value}`",
+        f"- Final verdict: **{row.verdict.value}** (worse of VirusTotal and AbuseIPDB)",
+        f"- VirusTotal: {vt_raw}",
+        f"- AbuseIPDB: {abuse}",
+        f"- Country: {row.country or 'n/a'}",
+        f"- Related domains/hashes: {related}",
+        f"- VirusTotal link: {row.vt_link or 'n/a'}",
+        f"- From 24h cache: {cache}{error}",
         "",
     ]
 
@@ -107,6 +107,6 @@ def verdict_style(verdict: Verdict) -> str:
         Verdict.CLEAN: "bold green",
         Verdict.SUSPICIOUS: "bold yellow",
         Verdict.MALICIOUS: "bold red",
-        Verdict.UNKNOWN: "bold bright_black",
+        Verdict.UNKNOWN: "bold grey50",
     }
     return mapping[verdict]

@@ -30,9 +30,15 @@ class Verdict(str, Enum):
 
 
 VT_NOT_FOUND_NOTE = (
-    "Brak analizy w VirusTotal — IOC nie był wcześniej skanowany"
+    "No VirusTotal analysis — this IOC has not been scanned before"
 )
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+_VERDICT_RANK = {
+    Verdict.CLEAN: 0,
+    Verdict.UNKNOWN: 1,
+    Verdict.SUSPICIOUS: 2,
+    Verdict.MALICIOUS: 3,
+}
 
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
@@ -41,7 +47,6 @@ _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?!-)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
     r"[a-zA-Z]{2,63}$"
 )
-_ABUSE_SCORE_THRESHOLD = 25
 
 
 @dataclass
@@ -51,6 +56,8 @@ class TriageResult:
     ioc: str
     ioc_type: IocType
     verdict: Verdict = Verdict.CLEAN
+    vt_verdict: Optional[Verdict] = None
+    abuse_verdict: Optional[Verdict] = None
     detection_count: int = 0
     vt_malicious: int = 0
     vt_suspicious: int = 0
@@ -160,10 +167,10 @@ def quote_userinfo(username: str, password: Optional[str]) -> str:
 
 
 def classify(detection_count: int) -> Verdict:
-    """Map engine detection count to a verdict.
+    """Map VirusTotal engine hits to a per-source verdict.
 
     Args:
-        detection_count: Combined malicious/suspicious engine hits.
+        detection_count: ``malicious + suspicious`` engine hits.
 
     Returns:
         Clean (0), Suspicious (1-3), or Malicious (4+).
@@ -175,49 +182,95 @@ def classify(detection_count: int) -> Verdict:
     return Verdict.MALICIOUS
 
 
-def verdict_from_sources(
-    detection_count: int,
+def classify_virustotal(
+    vt_malicious: int,
+    vt_suspicious: int,
     *,
     has_report: bool,
-) -> Verdict:
-    """Choose a verdict, using Unknown when no reputation report exists.
-
-    ``Clean`` is only returned when a report exists and zero engines flagged
-    the IOC.
+) -> Optional[Verdict]:
+    """Classify a VirusTotal lookup.
 
     Args:
-        detection_count: Combined engine hits.
-        has_report: True when VirusTotal or another source returned analysis.
+        vt_malicious: Malicious engine count.
+        vt_suspicious: Suspicious engine count.
+        has_report: True when VT returned analysis stats.
 
     Returns:
-        Classification verdict including ``Unknown``.
+        Per-source verdict, or ``Unknown`` when VT has no report.
+        ``None`` if VirusTotal was not queried.
     """
     if not has_report:
         return Verdict.UNKNOWN
-    return classify(detection_count)
+    count = max(0, vt_malicious) + max(0, vt_suspicious)
+    return classify(count)
 
 
-def detection_count_from_sources(
-    vt_malicious: int,
-    vt_suspicious: int,
-    abuse_score: Optional[int],
-) -> int:
-    """Combine VirusTotal stats and AbuseIPDB score into one engine count.
+def classify_abuseipdb(abuse_score: Optional[int]) -> Optional[Verdict]:
+    """Classify an AbuseIPDB confidence score.
 
-    AbuseIPDB contributes +1 when confidence is at least 25.
+    0-24 Clean, 25-74 Suspicious, 75-100 Malicious.
 
     Args:
-        vt_malicious: VirusTotal malicious engine count.
-        vt_suspicious: VirusTotal suspicious engine count.
-        abuse_score: AbuseIPDB abuseConfidenceScore, if available.
+        abuse_score: abuseConfidenceScore, or None if unused/unavailable.
 
     Returns:
-        Combined detection count used by ``classify``.
+        Per-source verdict, or ``None`` when there is no score.
     """
-    count = max(0, vt_malicious) + max(0, vt_suspicious)
-    if abuse_score is not None and abuse_score >= _ABUSE_SCORE_THRESHOLD:
-        count += 1
-    return count
+    if abuse_score is None:
+        return None
+    if abuse_score >= 75:
+        return Verdict.MALICIOUS
+    if abuse_score >= 25:
+        return Verdict.SUSPICIOUS
+    return Verdict.CLEAN
+
+
+def combine_verdicts(*verdicts: Optional[Verdict]) -> Verdict:
+    """Return the worse verdict among sources that produced a result.
+
+    Severity order: Malicious > Suspicious > Unknown > Clean.
+
+    Args:
+        verdicts: Per-source verdicts; ``None`` is ignored.
+
+    Returns:
+        Combined verdict. ``Unknown`` if no source produced a result.
+    """
+    present = [item for item in verdicts if item is not None]
+    if not present:
+        return Verdict.UNKNOWN
+    return max(present, key=lambda item: _VERDICT_RANK[item])
+
+
+def format_vt_cell(row: TriageResult) -> str:
+    """Human-readable VirusTotal column text.
+
+    Args:
+        row: Triage result.
+
+    Returns:
+        Verdict plus engine ratio, or an em dash.
+    """
+    if row.vt_verdict is None:
+        return "—"
+    if row.vt_total:
+        hits = row.vt_malicious + row.vt_suspicious
+        return f"{row.vt_verdict.value} {hits}/{row.vt_total}"
+    return row.vt_verdict.value
+
+
+def format_abuse_cell(row: TriageResult) -> str:
+    """Human-readable AbuseIPDB column text.
+
+    Args:
+        row: Triage result.
+
+    Returns:
+        Verdict plus confidence, or an em dash.
+    """
+    if row.abuse_verdict is None or row.abuse_score is None:
+        return "—"
+    return f"{row.abuse_verdict.value} {row.abuse_score}%"
 
 
 def _is_ip_address(value: str) -> bool:
