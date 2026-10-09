@@ -39,22 +39,14 @@ A missing key skips that integration with a warning instead of crashing.
 
 ```bash
 python triage.py --ioc 8.8.8.8
-python triage.py --file iocs.txt --export-md ticket.md
+python triage.py --file examples/sample_iocs.txt --export-md ticket.md
 ```
 
-Example `iocs.txt`:
-
-```
-# one IOC per line
-8.8.8.8
-example.com
-https://example.com/login
-d41d8cd98f00b204e9800998ecf8427e
-```
+A small ready-made list lives in [`examples/sample_iocs.txt`](examples/sample_iocs.txt): two public DNS IPs, `example.com`, its URL, and the EICAR test hash (usually **Malicious** on VirusTotal). Use that file in the CLI or upload it in the web UI.
 
 ## Web UI
 
-Double-click [`start_ui.bat`](start_ui.bat) (Windows). The browser should open at http://localhost:8501. Closing that console window stops the server.
+On Windows, double-click [`start_ui.bat`](start_ui.bat). It uses the project `.venv` and opens http://localhost:8501. Closing that console window stops the server. Optional: right-click the `.bat` → **Send to → Desktop (create shortcut)**.
 
 Or from a terminal:
 
@@ -62,7 +54,7 @@ Or from a terminal:
 streamlit run ui_app.py
 ```
 
-Paste IOCs or upload a file. Results stay in session state so downloading Markdown does not clear the table. Before a run, the UI estimates wait time (`uncached IOCs × 16s`) and caps the batch (default 20, max 50).
+Paste IOCs or upload a file (try `examples/sample_iocs.txt`). Results stay in session state so downloading Markdown does not clear the table. Before a run, the UI estimates wait time (`uncached IOCs × 16s`) and caps the batch (default 20, max 50). The first uncached run of the sample file can take about a minute because of the VirusTotal rate limit.
 
 ## Verdicts
 
@@ -94,14 +86,19 @@ pytest
 ## How it works
 
 ```
-triage.py / ui_app.py  →  detect_type (regex)
-                       →  JSON cache (24h)
-                       →  VirusTotal v3  (+ AbuseIPDB for IPs)
-                       →  per-source verdicts  →  worse-of  →  table / Markdown
+start_ui.bat / streamlit  →  ui_app.py
+python triage.py          →  CLI
+                          →  detect_type (regex)
+                          →  JSON cache (24h)
+                          →  VirusTotal v3  (+ AbuseIPDB for IPs)
+                          →  per-source verdicts  →  worse-of  →  table / Markdown
 ```
 
+- [`start_ui.bat`](start_ui.bat) — double-click launcher for the local web UI
+- [`ui_app.py`](ui_app.py) — Streamlit UI
+- [`triage.py`](triage.py) — CLI entry point
+- [`examples/sample_iocs.txt`](examples/sample_iocs.txt) — small sample list for a first run
 - [`core/classifier.py`](core/classifier.py) — IOC type, URL normalization, VT/AbuseIPDB verdicts
 - [`core/virustotal.py`](core/virustotal.py) / [`core/abuseipdb.py`](core/abuseipdb.py) — API clients; network errors do not abort the batch
 - [`core/cache.py`](core/cache.py) — JSON cache to protect the free API quota
 - [`reports/report_generator.py`](reports/report_generator.py) — ticket-ready Markdown
-- [`ui_app.py`](ui_app.py) — Streamlit UI
